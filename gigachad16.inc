@@ -178,6 +178,10 @@ gigachad_wrap:
                 ;dcr m
                 ;rnz
 
+                ; user-defined, sets carry if we don't want song to restart
+                call gigachad_wrap_hook
+                rc
+
                 ;; load song pointers
                 mvi a, OPCODE_ORA_A
                 sta gigachad_wrap_flag
@@ -272,6 +276,15 @@ ayvi53_send_L2
                 jp ayvi53_send_L1
                 ret
 
+
+ayvi53_stfu:
+                mvi a, $36
+                out 8
+                mvi a, $76
+                out 8
+                mvi a, $b6
+                out 8
+                ret
                 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
                 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 

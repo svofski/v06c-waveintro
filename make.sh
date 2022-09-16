@@ -9,15 +9,7 @@ ZX0_ORG=4000
 
 RSOUND="-DRSOUND=0"
 
-SONGE="sunvoices" # -- not terrible but not amazing
-SONGE="aki_uzvim" # nope
-SONGE="asynchro" # the intro doesn't work, but then it's actually cool
-SONGE="moon" # fast, has interesting sounds, but weird
-SONGE="mmcmp" # dunno..
-SONGE="manofart" # -- OK sounds keygenny 
-SONGE="kurtibm" # the melody is great, but the rhythm and bass are quite awful
-SONGE="rewritten" # THIS IS THE ONE
-SONGE="test" # test
+SONGE="unit5vi53"
 
 
 MAIN=wave

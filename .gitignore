@@ -1,0 +1,7 @@
+*.swp
+*.lst
+*.rom
+.saved.fdd
+tmp/*
+reloc-zx0.0100
+dzx0-fwd.4000

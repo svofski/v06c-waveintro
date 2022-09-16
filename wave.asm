@@ -8,6 +8,8 @@ SCALE_STEP      equ MAX_SCALE / 16
 
 FISH_Y          equ $40
 
+TEXT_Y          equ 0xA0
+
                 
 start:
                 di
@@ -22,19 +24,48 @@ start:
 		mvi	a, 0C9h
 		sta	38h
 
+                call ayvi53_stfu
                 call precalc_scales
-                
 Restart:
                 di
+		xra	a
+		out	10h
+		lxi	sp, 100h
+
                 lxi sp, $100
+
+		mvi	a, 0C9h
+		sta	38h
+                call ayvi53_stfu
+                
                 lxi h, colors_main + 15
                 call colorset
                 call cls
 
-                call fill_bottom
-                call init_wave
+                call fill_bottom  ; fill bottom of the bowl
+                call init_wave    ; init previous wave value
+Restart_loop:
+                di
+                call cls_c0       ; fast clear texts
                 xra a
-                sta dwav_phase
+                sta dwav_phase    ; phase = 0
+                sta dwav_voffs    ; vertical offset = 0
+                sta global_frm    ; frame = 0
+                sta waves_enabled ; waves disabled (at start)
+                sta waves_finishing ; not finishing
+                sta waves_finished ; enabled, just no change in amplitude
+                sta fish_enabled  ; fish disabled at start
+                sta msgseq_end_flag ; message sequence enabled
+                sta fish_wraparound_flag
+                mvi a, $1e      ; fish appears in this column
+                sta fish_col
+                mvi a, $ff    ; msb of initial scale increment (-128)
+                sta ampl_inc_sign
+
+                mvi a, $34
+                sta dwav_voffs_alt ; voffs = inr
+
+                call msgseq_init
 
                 ; gigachad
 
@@ -52,38 +83,69 @@ Restart:
                 
                 ei
 
-                call drawfish
+                ; the fish will be painted in motion when enabled
+                ;call drawfish
+
+                mvi a, $60          ; putchar draws to backing store $6000
+                sta _putchar_msb
 
                 ;;; main loop
-                lxi h, costab_s + 128 * 32
+                lxi h, costab_s + 128 * 20  ; initial phase = zero waves
 bob_1                
-                mvi c, 32
+                mvi c, 20                   ; number of steps
 bob_2           
-                ;ei
-                ;hlt
-                ;ei
-                ;hlt
-                ;ei
-                ;hlt
-
+                lda waves_finishing
+                ora a
+                jz bob_22
+                
+                ; finishing, check that the wave is at 0
+                mvi a, (costab_s + 128 * 20)>>8
+                cmp h
+                jnz bob_22
+                mvi a, (costab_s + 128 * 20) & 255
+                cmp l
+                jnz bob_22
+                ; finally reached zero amplitude
+                ;xra a
+                ;sta waves_enabled
+                mvi a, $ff
+                sta waves_finished 
+                ; disable, but paint the zero amplitude wave first
+                jmp bob_222
+bob_22:
+                lda waves_enabled
+                ora a
+                jz bob_2
+bob_222:
                 push b
                 push h
                 shld wave_coeff         ; current wave scale
                 call diffwave
+                call msgseq_frame
 
-                ;call dumbshift
-
+bob_l1:
                 pop h
                 pop b
 bob_3
+                lda waves_finished
+                ora a
+                jz next_amplitude
+                lda dwav_voffs_alt
+                ora a
+                jz Restart_loop  ; all done, restart
+                jmp bob_1 ; finishing..
+
+                ;jnz bob_1  ; finished -> no amplitude increment/decrement
+next_amplitude:
+ampl_inc_sign   equ $+2
                 lxi d, -128
                 dad d
                 dcr c
                 jnz bob_2
                 ; invert increment
-                lda bob_3 + 2
+                lda ampl_inc_sign  
                 cma
-                sta bob_3 + 2
+                sta ampl_inc_sign  
                 jmp bob_1
                 ;;;;;;;;;;;;;;;;;
                 ;;;;;;;;;;;;;;;;;
@@ -112,6 +174,17 @@ iw_l1
                 jnz iw_l1
                 ret
 
+gigachad_wrap_hook:
+                lda msgseq_end_flag
+                rar
+                rnc
+                call ayvi53_stfu
+                mvi a, $ff
+                sta waves_finishing
+                call gigachad_disable
+                stc
+                ret
+
 interrupt:      push psw
                 push b
                 push d
@@ -122,25 +195,342 @@ interrupt:      push psw
                 ;out $c
 
                 call gigachad_frame
-                call ay_send_user
-                call ay_send_vi53
-                call NoiseProcInt
+                ;call ay_send_user
+                lda waves_finishing
+                ora a
+                cz ay_send_vi53
+
+                ;call NoiseProcInt ; useless, but it would break messages if i remove it
 
                 ;mvi a, 1
                 ;out $c
 
-                call dumbshift
+                lda fish_enabled
+                ora a
+                cnz dumbshift
                 ;call movefish
 
                 ;mvi a, 0
                 ;out $c
 
+                lxi h, global_frm
+                mov a, m
+                inr a
+                mov m, a
+                cpi 200
+                jnz intr_l1
+                ;;;mvi a, 1
+                ;lda waves_finishing
+                ;cma
+                mvi a, $ff
+                sta waves_enabled
+intr_l1:
                 pop h
                 pop d
                 pop b
                 pop psw
                 ei
                 ret
+
+global_frm      db 0
+waves_enabled   db 0
+waves_finishing db 0        ; $ff when waves should stop waving
+waves_finished  db 0        ; $ff when waves finished waving (but still enabled)
+fish_enabled    db 0
+msgseq_frm      db 0
+msgseq_fadectr  db 0
+msgseq_ptr      dw 0
+msgseq_y        db 0
+msgseq_end_flag db 0        ; end of message sequence
+msgseq_fish_sync db 0       ; waiting for the fish
+fish_wraparound_flag db 0
+
+; 24 is approx the fish line
+
+m_hello         db 70, 1, 0
+                db 70,2,    '        GIVE IT UP FOR...       ', 0
+                db 1, 5,    '  #####   ##   ##  ##### #####  ', 0
+                db 1, 6,    '  ##  ##  ##   ##  ##       ##  ', 0
+                db 1, 7,    '  ##  ##  ##   ##  ##      ##   ', 0
+                db 1, 8,    '  #####   ##  ###  ####   ###   ', 0
+                db 1, 9,    '  ##   ## ## # ##     ##    ##  ', 0
+                db 1, 10,   '  ##   ## ###  ##     ##    ##  ', 0
+                db 25,11,   '  ######  ##   ##  ####  ####   ', 0
+
+
+                db 30, 16, ' AY/VI53 EMULATOR FISH SAYS HI!', 0
+                db 1, 255   ; fish enabler
+                db 1,2,     '        GIVE IT UP FOR...        ', 0
+                db 1,20,    ' AYVI53 IVAGOR   GIGACHAD16 SVO', 0
+                db 1,2,0
+                db 1,2,     '        GIVE IT UP FOR...        ', 0
+                db 1,29,    ' MUSIC|UNIT-5 REWRITTEN BY KURT ', 0
+                db 50,2,0
+
+                db 1, 16, 0
+                db 1, 20, 0
+                db 170, 29, 0
+
+                db 250,2,     '    PLAYED BY SECOND TO NONE    ', 0   
+                ; 254 = fish synchronizer
+                db 1, 254
+                db 25, 24,   '   DESASTER  ERRORSOFT          ', 0
+                db 1, 254
+                db 25, 24,   '   FIXEL  FROG                  ', 0
+                db 1, 254
+                db 25, 24,   '   IVAGOR   KAN SOFT            ', 0
+                db 1, 254
+                db 25, 24,   '   LAFROMM31   MANWE            ', 0
+                db 1, 254
+                db 25, 24,   '   METAMORPHO  NZEEMIN          ', 0
+                db 1, 254
+                db 25, 24,   '     PYK   TNT23                ', 0
+                db 1, 254
+                db 254, 24,   '   RETROTECHSQUAD              ', 0
+                db 254, 1, 0
+                db 2,  2, 0
+                db 1,  5, 0
+                db 1,  6, 0
+                db 1,  7,     '       VI53 SECOND TO NONE      ', 0
+                db 1,  8, 0
+                db 1,  9,     '  A NOISY INTRO FOR UNEXPANDED  ', 0
+                db 1,  10, 0
+                db 1,  11,    '          VECTOR-06C            ', 0
+                db 1, 12, 0
+                db 1, 28,     '           SVO  2022            ', 0
+                db 250,  16, 0
+                db 250,  16, 0
+                db 250,  16, 0
+                db 250,  16, 0
+                db 250,  16, 0
+                db 250,  16, 0
+
+                db 0, 0
+
+msgseq_init:    
+                lxi h, m_hello
+                shld msgseq_ptr
+                xra a
+                sta msgseq_frm
+                sta msgseq_fadectr
+                ret
+
+msgseq_frame:    
+                lxi h, msgseq_fadectr   ; если фейд, продолжаем фейд
+                mov a, m
+                ora a
+                jnz msgseq_fade
+                
+                lxi h, msgseq_frm       ; задержка
+                mov a, m
+                ora a
+                jz msgseq_next          ; дотикали, следующее сообщение
+
+                dcr m                   ; счетчик задержки -= 1, выход
+                ret
+
+msgseq_next:
+                lda msgseq_fish_sync
+                ora a
+                jz msgseq_next_nosync
+                lda fish_wraparound_flag
+                ora a
+                rz
+                xra a
+                sta msgseq_fish_sync
+msgseq_next_nosync:
+                ; берем следующее сообщение, печатаем, ставим задержку
+                lhld msgseq_ptr
+                mov a, m
+                sta msgseq_frm
+                mvi a, 32
+                sta msgseq_fadectr
+                inx h
+
+                mov a, m
+                cpi 255   ; fish enabler
+                jnz mseq_next_l1
+                mvi a, 1
+                sta fish_enabled
+                inx h
+                jmp mseq_next_l2
+mseq_next_l1:
+                cpi 254   ; fish synchronizer
+                jnz mseq_next_normal
+                xra a
+                sta fish_wraparound_flag
+                mvi a, 1
+                sta msgseq_fish_sync
+                inx h
+                jmp mseq_next_l2
+mseq_next_normal:
+                ral \ ral \ ral \ cma \ inr a
+
+                sta msgseq_y
+                push h
+                mvi h, 0
+                mov l, a
+                call gotoxy
+                pop h
+                inx h
+
+                mov a, m
+                ora a
+                cz   wipestr
+                cnz  puts
+                inx h
+                mov a, m
+
+                ora a ; 0 признак конца секвенции, ставим флажок
+                jz msgseq_end
+mseq_next_l2:
+                shld msgseq_ptr
+                ret
+
+
+                db 0, 0
+
+msgseq_init:    
+                lxi h, m_hello
+                shld msgseq_ptr
+                xra a
+                sta msgseq_frm
+                sta msgseq_fadectr
+                ret
+
+msgseq_frame:    
+                lxi h, msgseq_fadectr   ; если фейд, продолжаем фейд
+                mov a, m
+                ora a
+                jnz msgseq_fade
+                
+                lxi h, msgseq_frm       ; задержка
+                mov a, m
+                ora a
+                jz msgseq_next          ; дотикали, следующее сообщение
+
+                dcr m                   ; счетчик задержки -= 1, выход
+                ret
+
+msgseq_next:
+                ; берем следующее сообщение, печатаем, ставим задержку
+                lhld msgseq_ptr
+                mov a, m
+                sta msgseq_frm
+                mvi a, 32
+                sta msgseq_fadectr
+                inx h
+
+                mov a, m
+                cpi 255   ; fish enabler
+                jnz mseq_next_l1
+                mvi a, 1
+                sta fish_enabled
+                inx h
+                jmp mseq_next_l2
+mseq_next_l1:
+                ral \ ral \ ral \ cma \ inr a
+
+                sta msgseq_y
+                push h
+                mvi h, 0
+                mov l, a
+                call gotoxy
+                pop h
+                inx h
+
+                mov a, m
+                ora a
+                cz   wipestr
+                cnz  puts
+                inx h
+                mov a, m
+
+                ora a ; 0 признак конца секвенции, ставим флажок
+                jz msgseq_end
+mseq_next_l2:
+                shld msgseq_ptr
+                ret
+
+msgseq_end:   
+                ; ставим признак конца секвенции, но не смещаем указатель
+                mvi a, 1
+                sta msgseq_end_flag
+                ret
+
+                
+                ; делаем фейд 32 кадра
+msgseq_fade     dcr m                   ; счетчик фейдa -= 1
+
+fade_text_frame2:
+                mvi c, 8
+ftf2_l1
+                call rnd8   ; result in A and rnd8val
+                mov d, a
+                mvi a, 7
+                ana d
+                mov e, a
+                xra d       ; high 5 bit = column
+                rar \ rar \ rar
+                adi $60
+                mov h, a
+                xri $a0
+                mov d, a
+
+                lda msgseq_y
+                sui 7
+                add e
+                mov l, a
+                mov e, a
+
+                mov a, m
+                stax d
+
+                dcr c
+                jnz ftf2_l1
+                ret
+
+                
+
+;fade_text_init:       
+;                ret
+;
+;fade_text_frame:
+;
+;ff_bubu:
+;                call rnd11 ; clobbers a, h, l
+;                
+;                lxi d, (TEXT_Y - 7) << 8
+;                dad d
+;                
+;                mov e, h
+;
+;                mvi b, PixelMask >> 8
+;                mvi a, 7
+;                ana l       ; x
+;                mov c, a    ; bc = &pixelmask
+;
+;                xra l
+;                rar \ rar \ rar
+;                adi $60   ; source plane $6000
+;                mov h, a
+;                xri $a0
+;
+;                mov d, a  ; de = $c000[xy]
+;                mov l, e
+;
+;                ldax b    ; pixel mask
+;
+;                ana m     ; pixel & src
+;                xchg
+;                ora m     ; (pixel & src) | screen
+;                mov m, a
+;
+;                ret
+;
+;                jmp ff_bubu
+;
+      
 
                 
                 .org $100 + . & 0xff00
@@ -206,7 +596,21 @@ dwav_samecol:
                 ; bounce up / down
                 lxi h, dwav_voffs
 dwav_voffs_alt:
-                inr m
+                inr m           ; SELFMOD inr/dcr
+
+                lda waves_finishing
+                ora a
+                jz dwav_notf
+
+                ; finishing: disable voffs change when at 0
+                xra a
+                ora m
+                jnz dwav_notf
+
+                sta dwav_voffs_alt  ; set increment/decrement to nop
+                ret
+
+dwav_notf:
                 mvi a, 25
                 cmp m
                 jz dwav_todcr
@@ -214,10 +618,10 @@ dwav_voffs_alt:
                 cmp m
                 jz dwav_toinr
                 ret
-dwav_todcr      mvi a, $35
+dwav_todcr      mvi a, $35      ; dcr m
                 sta dwav_voffs_alt
                 ret
-dwav_toinr      mvi a, $34
+dwav_toinr      mvi a, $34      ; inr m
                 sta dwav_voffs_alt
                 ret
                 
@@ -353,6 +757,27 @@ cls_l1:
                 jnz cls_l1
                 ret
 
+cls_c0:         ; clear only c000
+                di
+                lxi h, 0
+                dad sp
+                shld clsc0_sp
+                lxi sp, 0xc000+0x2000
+                lxi d, 0
+                ; total of 
+                xra a
+cls_c0_l1:
+                push d \ push d \ push d \ push d
+                push d \ push d \ push d \ push d
+                push d \ push d \ push d \ push d
+                push d \ push d \ push d \ push d
+                dcr a
+                jnz cls_c0_l1
+
+clsc0_sp        equ $+1
+                lxi sp, 0
+                ret
+
 colorset:
                 ei
                 hlt
@@ -374,6 +799,8 @@ colorset1:	mov	a, c
 		jp	colorset1
 		mvi	a,255
 		out	3
+                mvi a, 4
+                out 2
                 ret
 
 
@@ -386,10 +813,41 @@ drawfish:
                 call drawspr
                 ret
 
+maybe_wipe_fish:
+                mvi a, $ff
+                sta fish_wraparound_flag
+                lda msgseq_end_flag
+                ora a
+                rz
+                xra a
+                sta fish_enabled
+                ; time to let go of the fish
+                lxi d, fishz0
+                mvi h, $c0
+                mvi l, FISH_Y
+
+                lxi b, $0208
+mwf_l2:
+                xra a
+mwf_l1:
+                mov m, a \ inr h \ mov m, a \ dcr l
+                mov m, a \ dcr h \ mov m, a \ dcr l
+                dcr c
+                jnz mwf_l1
+                mvi a, $20
+                add h
+                mov h, a
+                mvi l, FISH_Y
+                dcr b
+                jnz mwf_l2
+              
+                ret
+
 drawfish_a      
                 mov a, m
                 cpi $1e
-                rp
+                jp maybe_wipe_fish
+                ;rp
 
                 lxi d, fisha0
                 mvi a, $c0
@@ -411,7 +869,8 @@ drawfish_a
 drawfish_b      
                 mov a, m
                 cpi $1e
-                rp
+                jp maybe_wipe_fish
+                ;rp
 
                 lxi d, fishb0
                 mvi a, $c0
@@ -461,6 +920,7 @@ fish_col_frac   db 1
 fish_col        db $0f
 shiftctr        db 0
 
+                ; fish swimming
 dumbshift:
                 lda fish_col
                 adi $c0
@@ -487,10 +947,6 @@ dumbshift:
                 mvi a, FISH_Y
                 mov l, a \ mov e, a \ mov c, a
                 call oneshift
-
-                ;
-                ; --
-                ;
 
                 lxi h, fish_col_frac
                 mov a, m
@@ -708,8 +1164,9 @@ PixelMask:
 		.db 00000011b
 		.db 00000001b
                 
-floor0          equ 363q
-floor1          equ 373q ; 213q
+floor0          equ 363q ; darker
+floor1          equ 373q ; lighter
+floor2          equ 0
 pic1            equ 156q  ; желтушный
 pic2            equ 114q  ; малиновый
 pic3            equ 377q  ; блѣ
@@ -718,10 +1175,9 @@ colors0:        .ds 16
 
 colors_main:
                 .db floor0, pic2, pic3, pic1
+                .db floor2, pic2, pic3, pic1
                 .db floor1, pic2, pic3, pic1
                 .db floor1, pic2, pic3, pic1
-                .db floor0, pic2, pic3, pic1
-
 
 costab          .db 255, 255, 254, 254, 253, 251, 250, 248, 245, 243, 240, 237, 234, 230, 226, 222, 218, 213, 208, 203, 198, 193, 188, 182, 176, 170, 165, 158, 152, 146, 140, 134, 128, 121, 115, 109, 103, 97, 90, 85, 79, 73, 67, 62, 57, 52, 47, 42, 37, 33, 29, 25, 21, 18, 15, 12, 10, 7, 5, 4, 2, 1, 1, 0
 
@@ -730,7 +1186,10 @@ costab          .db 255, 255, 254, 254, 253, 251, 250, 248, 245, 243, 240, 237, 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 .include fish.inc
+fishz0: ds 32   ; empty sprite for wiping
 .include VI53.asm
+.include rand.asm   ; rnd11
+.include font8x8.asm
 
 ; songe
 song_1:         dw songA_00, songA_01, songA_02, songA_03, songA_04, songA_05, songA_06
@@ -741,5 +1200,3 @@ song_1:         dw songA_00, songA_01, songA_02, songA_03, songA_04, songA_05, s
 
 costab_s        .equ gigachad_end
 
-shift0_0        equ $7000
-shift0_1        equ $7400
